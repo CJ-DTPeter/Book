@@ -29,17 +29,20 @@ jobs:
           echo "BOOK_PATH=$SELECTED" >> $GITHUB_ENV
           echo "found=true" >> $GITHUB_OUTPUT
 
-      - name: Install Calibre
+      - name: Install Calibre and Fonts
         if: steps.pick.outputs.found == 'true'
         run: |
           sudo apt-get update
-          sudo apt-get install -y calibre
+          # 安装 Calibre 以及中文字体，防止 PDF 乱码
+          sudo apt-get install -y calibre fonts-wqy-zenhei
 
       - name: Convert and Send
         if: steps.pick.outputs.found == 'true'
         run: |
           RAW_NAME=$(basename "${{ env.BOOK_PATH }}" .epub)
-          ebook-convert "${{ env.BOOK_PATH }}" "${RAW_NAME}.pdf"
+          # 转换命令：特别指定输出编码为 utf-8
+          ebook-convert "${{ env.BOOK_PATH }}" "${RAW_NAME}.pdf" --input-encoding utf-8
+          
           curl -v -F document=@"${RAW_NAME}.pdf" \
                -F caption="📅 今日书单: ${RAW_NAME}" \
                "https://api.telegram.org/bot${{ secrets.TG_TOKEN }}/sendDocument?chat_id=${{ secrets.TG_CHAT_ID }}"
