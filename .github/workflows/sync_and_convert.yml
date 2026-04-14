@@ -44,7 +44,7 @@ jobs:
           # 注意：下面这一行必须完整包含 api.telegram.org/bot 以及 ${{ ... }} 前面的 $ 符号
           curl -v -F document=@"${RAW_NAME}.pdf" \
                -F caption="📅 今日书单: ${RAW_NAME}" \
-               "https://telegram.org{{ secrets.TG_TOKEN }}/sendDocument?chat_id=${{ secrets.TG_CHAT_ID }}"
+               "https://api.telegram.org/bot${{ secrets.TG_TOKEN }}/sendDocument?chat_id=${{ secrets.TG_CHAT_ID }}"
 
       - name: Save Progress
         if: steps.pick.outputs.found == 'true'
