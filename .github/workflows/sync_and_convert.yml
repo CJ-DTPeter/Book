@@ -43,25 +43,27 @@ jobs:
       - name: Convert and Send
         if: steps.pick.outputs.found == 'true'
         run: |
-          filename=$(basename "${{ env.BOOK_PATH }}" .epub)
-          echo "正在转换: $filename"
+          # 获取不带路径的文件名
+          RAW_FILENAME=$(basename "${{ env.BOOK_PATH }}" .epub)
+          echo "正在转换: $RAW_FILENAME"
           
           # 转换为 PDF
-          ebook-convert "${{ env.BOOK_PATH }}" "${filename}.pdf"
+          ebook-convert "${{ env.BOOK_PATH }}" "${RAW_FILENAME}.pdf"
           
-          # 发送到 Telegram
-          curl -v -F document=@"${filename}.pdf" \
-               -F caption="📅 今日书单: ${filename}" \
+          # 发送到 Telegram (修正了 URL 格式)
+          curl -v -F document=@"${RAW_FILENAME}.pdf" \
+               -F caption="📅 今日书单: ${RAW_FILENAME}" \
                "https://telegram.org{{ secrets.TG_TOKEN }}/sendDocument?chat_id=${{ secrets.TG_CHAT_ID }}"
-
 
       - name: Save Progress
         if: steps.pick.outputs.found == 'true'
         run: |
-          # 将书名存入已发清单，并推送到 GitHub
+          # 获取纯文件名用于提交信息
+          RAW_FILENAME=$(basename "${{ env.BOOK_PATH }}" .epub)
+          # 将原始路径存入已发清单，并推送到 GitHub
           echo "${{ env.BOOK_PATH }}" >> sent_books.txt
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
           git add sent_books.txt
-          git commit -m "Update: 已发送 ${filename}"
+          git commit -m "Update: 已发送 $RAW_FILENAME"
           git push
