@@ -14,10 +14,7 @@ jobs:
       - name: Pick One Book
         id: pick
         run: |
-          # 1. 扫描所有 epub 文件并存入临时列表
           find . -name "*.epub" > all_books.txt
-          
-          # 2. 找出还没发过的第一本书
           SELECTED=""
           while IFS= read -r line; do
             if ! grep -q "$line" sent_books.txt; then
@@ -25,12 +22,10 @@ jobs:
               break
             fi
           done < all_books.txt
-
           if [ -z "$SELECTED" ]; then
             echo "所有书籍已发送完毕！"
             exit 0
           fi
-
           echo "BOOK_PATH=$SELECTED" >> $GITHUB_ENV
           echo "found=true" >> $GITHUB_OUTPUT
 
@@ -43,27 +38,21 @@ jobs:
       - name: Convert and Send
         if: steps.pick.outputs.found == 'true'
         run: |
-          # 获取不带路径的文件名
-          RAW_FILENAME=$(basename "${{ env.BOOK_PATH }}" .epub)
-          echo "正在转换: $RAW_FILENAME"
-          
-          # 转换为 PDF
-          ebook-convert "${{ env.BOOK_PATH }}" "${RAW_FILENAME}.pdf"
-          
-          # 发送到 Telegram (修正了 URL 格式)
-          curl -v -F document=@"${RAW_FILENAME}.pdf" \
-               -F caption="📅 今日书单: ${RAW_FILENAME}" \
+          RAW_NAME=$(basename "${{ env.BOOK_PATH }}" .epub)
+          echo "正在转换: $RAW_NAME"
+          ebook-convert "${{ env.BOOK_PATH }}" "${RAW_NAME}.pdf"
+          # 注意：下面这一行必须完整包含 api.telegram.org/bot 以及 ${{ ... }} 前面的 $ 符号
+          curl -v -F document=@"${RAW_NAME}.pdf" \
+               -F caption="📅 今日书单: ${RAW_NAME}" \
                "https://telegram.org{{ secrets.TG_TOKEN }}/sendDocument?chat_id=${{ secrets.TG_CHAT_ID }}"
 
       - name: Save Progress
         if: steps.pick.outputs.found == 'true'
         run: |
-          # 获取纯文件名用于提交信息
-          RAW_FILENAME=$(basename "${{ env.BOOK_PATH }}" .epub)
-          # 将原始路径存入已发清单，并推送到 GitHub
+          RAW_NAME=$(basename "${{ env.BOOK_PATH }}" .epub)
           echo "${{ env.BOOK_PATH }}" >> sent_books.txt
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
           git add sent_books.txt
-          git commit -m "Update: 已发送 $RAW_FILENAME"
+          git commit -m "Update: 已发送 $RAW_NAME"
           git push
