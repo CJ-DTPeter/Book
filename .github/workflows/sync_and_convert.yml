@@ -1,48 +1,66 @@
-name: EPUB to PDF and Push
+name: Daily Book Delivery
 on:
   schedule:
-    - cron: '0 2 * * *' # 每天北京时间上午 10:00 自动检查一次更新
-  workflow_dispatch:      # 允许你随时手动点击运行
+    - cron: '0 2 * * *' # 每天北京时间上午 10:00 运行
+  workflow_dispatch:      # 支持手动触发
 
 jobs:
-  check_and_push:
+  send_book:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Your Fork
+      - name: Checkout Code
         uses: actions/checkout@v3
-        with:
-          fetch-depth: 0 # 获取所有历史以对比更新
 
-      - name: Sync with Upstream
+      - name: Pick One Book
+        id: pick
         run: |
-          git remote add upstream https://github.com
-          git fetch upstream
-          # 检查原作者是否有更新，获取最新变动的文件名
-          NEW_FILES=$(git diff --name-only HEAD upstream/main | grep ".epub" || true)
-          echo "NEW_FILES=$NEW_FILES" >> $GITHUB_ENV
-          # 合并更新到你的仓库
-          git merge upstream/main
+          # 1. 扫描所有 epub 文件并存入临时列表
+          find . -name "*.epub" > all_books.txt
+          
+          # 2. 找出还没发过的第一本书
+          SELECTED=""
+          while IFS= read -r line; do
+            if ! grep -q "$line" sent_books.txt; then
+              SELECTED="$line"
+              break
+            fi
+          done < all_books.txt
 
-      - name: Install Calibre (Conversion Tool)
-        if: env.NEW_FILES != ''
+          if [ -z "$SELECTED" ]; then
+            echo "所有书籍已发送完毕！"
+            exit 0
+          fi
+
+          echo "BOOK_PATH=$SELECTED" >> $GITHUB_ENV
+          echo "found=true" >> $GITHUB_OUTPUT
+
+      - name: Install Calibre
+        if: steps.pick.outputs.found == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y calibre
 
       - name: Convert and Send
-        if: env.NEW_FILES != ''
+        if: steps.pick.outputs.found == 'true'
         run: |
-          mkdir -p output
-          for file in $NEW_FILES; do
-            if [ -f "$file" ]; then
-              filename=$(basename "$file" .epub)
-              echo "Converting $file..."
-              # 转换格式为 PDF
-              ebook-convert "$file" "output/${filename}.pdf"
-              
-              # 发送到 Telegram
-              curl -v -F document=@"output/${filename}.pdf" \
-                   -F caption="📖 新书入库: ${filename}" \
-                   "https://telegram.org{{ secrets.TG_TOKEN }}/sendDocument?chat_id=${{ secrets.TG_CHAT_ID }}"
-            fi
-          done
+          filename=$(basename "${{ env.BOOK_PATH }}" .epub)
+          echo "正在转换: $filename"
+          
+          # 转换为 PDF
+          ebook-convert "${{ env.BOOK_PATH }}" "${filename}.pdf"
+          
+          # 发送到 Telegram
+          curl -v -F document=@"${filename}.pdf" \
+               -F caption="📅 今日书单: ${filename}" \
+               "https://telegram.org{{ secrets.TG_TOKEN }}/sendDocument?chat_id=${{ secrets.TG_CHAT_ID }}"
+
+      - name: Save Progress
+        if: steps.pick.outputs.found == 'true'
+        run: |
+          # 将书名存入已发清单，并推送到 GitHub
+          echo "${{ env.BOOK_PATH }}" >> sent_books.txt
+          git config --global user.name "GitHub Action"
+          git config --global user.email "action@github.com"
+          git add sent_books.txt
+          git commit -m "Update: 已发送 ${filename}"
+          git push
