@@ -1,8 +1,8 @@
 name: Daily Book Delivery
 on:
   schedule:
-    - cron: '0 2 * * *' # 每天北京时间上午 10:00 运行
-  workflow_dispatch:      # 支持手动触发
+    - cron: '0 2 * * *'
+  workflow_dispatch:
 
 jobs:
   send_book:
@@ -23,7 +23,7 @@ jobs:
             fi
           done < all_books.txt
           if [ -z "$SELECTED" ]; then
-            echo "所有书籍已发送完毕！"
+            echo "All books sent."
             exit 0
           fi
           echo "BOOK_PATH=$SELECTED" >> $GITHUB_ENV
@@ -39,9 +39,7 @@ jobs:
         if: steps.pick.outputs.found == 'true'
         run: |
           RAW_NAME=$(basename "${{ env.BOOK_PATH }}" .epub)
-          echo "正在转换: $RAW_NAME"
           ebook-convert "${{ env.BOOK_PATH }}" "${RAW_NAME}.pdf"
-          # 注意：下面这一行必须完整包含 api.telegram.org/bot 以及 ${{ ... }} 前面的 $ 符号
           curl -v -F document=@"${RAW_NAME}.pdf" \
                -F caption="📅 今日书单: ${RAW_NAME}" \
                "https://api.telegram.org/bot${{ secrets.TG_TOKEN }}/sendDocument?chat_id=${{ secrets.TG_CHAT_ID }}"
@@ -54,5 +52,5 @@ jobs:
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
           git add sent_books.txt
-          git commit -m "Update: 已发送 $RAW_NAME"
+          git commit -m "Update: $RAW_NAME"
           git push
