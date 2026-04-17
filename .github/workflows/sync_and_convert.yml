@@ -52,7 +52,17 @@ jobs:
         run: |
           RAW_NAME=$(basename "${{ env.BOOK_PATH }}" .epub)
           echo "${{ env.BOOK_PATH }}" >> sent_books.txt
+          
           git config --global user.name "GitHub Action"
+          git config --global user.email "action@github.com"
+          
+          git add sent_books.txt
+          git commit -m "Update: $RAW_NAME"
+          
+          # 关键点：先拉取远程更新，防止 push 冲突
+          git pull origin main --rebase
+          
+          git push origin main
           git config --global user.email "action@github.com"
           git add sent_books.txt
           git commit -m "Update: $RAW_NAME"
