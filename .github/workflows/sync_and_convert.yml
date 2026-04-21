@@ -14,18 +14,27 @@ jobs:
       - name: Pick One Book
         id: pick
         run: |
-          find . -name "*.epub" > all_books.txt
+          # 确保 sent_books.txt 存在
+          touch sent_books.txt
+
+          find . -name "*.epub" | sort > all_books.txt
+
           SELECTED=""
+
           while IFS= read -r line; do
-            if ! grep -q "$line" sent_books.txt; then
+            # ⭐ 精确匹配（整行匹配）
+            if ! grep -Fxq "$line" sent_books.txt; then
               SELECTED="$line"
               break
             fi
           done < all_books.txt
+
           if [ -z "$SELECTED" ]; then
             echo "All books sent."
+            echo "found=false" >> $GITHUB_OUTPUT
             exit 0
           fi
+
           echo "BOOK_PATH=$SELECTED" >> $GITHUB_ENV
           echo "found=true" >> $GITHUB_OUTPUT
 
