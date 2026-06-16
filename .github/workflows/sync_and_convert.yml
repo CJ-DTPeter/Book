@@ -49,11 +49,19 @@ jobs:
         if: steps.pick.outputs.found == 'true'
         run: |
           RAW_NAME=$(basename "${{ env.BOOK_PATH }}" .epub)
-          # 转换命令：特别指定输出编码为 utf-8
-          ebook-convert "${{ env.BOOK_PATH }}" "${RAW_NAME}.pdf" --input-encoding utf-8
+          PDF_PATH="${RAW_NAME}.pdf"
+          SEND_FILE="${PDF_PATH}"
+          CAPTION="📅 今日书单: ${RAW_NAME}"
+
+          # 转换命令：特别指定输出编码为 utf-8。若转换超时或失败，则回退发送原始 epub，避免任务整体失败
+          if ! timeout 25m ebook-convert "${{ env.BOOK_PATH }}" "${PDF_PATH}" --input-encoding utf-8; then
+            echo "PDF conversion failed or timed out, fallback to original EPUB"
+            SEND_FILE="${{ env.BOOK_PATH }}"
+            CAPTION="📅 今日书单(EPUB): ${RAW_NAME}"
+          fi
           
-          curl -v -F document=@"${RAW_NAME}.pdf" \
-               -F caption="📅 今日书单: ${RAW_NAME}" \
+          curl --fail-with-body -v -F document=@"${SEND_FILE}" \
+               -F caption="${CAPTION}" \
                "https://api.telegram.org/bot${{ secrets.TG_TOKEN }}/sendDocument?chat_id=${{ secrets.TG_CHAT_ID }}"
 
       - name: Save Progress
