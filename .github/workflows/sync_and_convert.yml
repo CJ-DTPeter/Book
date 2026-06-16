@@ -2,7 +2,7 @@ name: Daily Book Delivery
 
 on:
   schedule:
-    - cron: '0 2 * * *'
+    - cron: "0 2 * * *"
   workflow_dispatch:
 
 jobs:
@@ -16,7 +16,7 @@ jobs:
       - name: Install Calibre and Fonts
         run: |
           sudo apt-get update
-          sudo apt-get install -y calibre fonts-wqy-zenhei
+          sudo apt-get install -y calibre fonts-wqy-zenhei unzip
 
       - name: Pick, Convert and Send
         id: process
@@ -33,90 +33,71 @@ jobs:
           SKIPPED_CHANGED=false
 
           while IFS= read -r BOOK_PATH; do
-            if grep -Fxq "$BOOK_PATH" sent_books.txt; then
-              continue
-            fi
+            grep -Fxq "$BOOK_PATH" sent_books.txt && continue
+            grep -Fxq "$BOOK_PATH" skipped_books.txt && continue
 
-            if grep -Fxq "$BOOK_PATH" skipped_books.txt; then
-              continue
-            fi
-
-            RAW_NAME=$(basename "$BOOK_PATH" .epub)
+            RAW_NAME="$(basename "$BOOK_PATH" .epub)"
             PDF_PATH="${RAW_NAME}.pdf"
 
             echo "Trying: $BOOK_PATH"
 
-            PRECHECK=$(python3 - "$BOOK_PATH" <<'PY'
-import sys, zipfile
+            HTML_COUNT="$(
+              unzip -Z1 "$BOOK_PATH" |
+              grep -Eci '\.(html|xhtml)$'
+            )"
 
-book = sys.argv[1]
-html_count = -1
-generator = ""
+            OPF_FILE="$(
+              unzip -Z1 "$BOOK_PATH" |
+              grep -E '(^|/)content\.opf$' |
+              head -n 1
+            )"
 
-try:
-    with zipfile.ZipFile(book) as zf:
-        names = zf.namelist()
-        html_count = sum(1 for name in names if name.lower().endswith((".html", ".xhtml")))
-        for candidate in ("OEBPS/content.opf", "content.opf"):
-            if candidate in names:
-                data = zf.read(candidate).decode("utf-8", "ignore")
-                if "EasyPub" in data:
-                    generator = "EasyPub"
-                break
-except Exception:
-    pass
-
-print(f"{html_count}|{generator}")
-PY
-)
-
-            HTML_COUNT=${PRECHECK%%|*}
-            GENERATOR=${PRECHECK#*|}
-
-            # 超大 EasyPub 网文在 Calibre PDF 渲染里经常卡死或报假性 style.css 错误
-            # 这类书直接永久跳过，避免每天重复浪费 runner 时间
-            if [ "${GENERATOR}" = "EasyPub" ] && [ "${HTML_COUNT}" -ge 3000 ]; then
-              echo "Precheck skipped oversized EasyPub EPUB (${HTML_COUNT} HTML files): $BOOK_PATH"
-              if ! grep -Fxq "$BOOK_PATH" skipped_books.txt; then
-                echo "$BOOK_PATH" >> skipped_books.txt
-                SKIPPED_CHANGED=true
+            IS_EASYPUB=false
+            if [ -n "$OPF_FILE" ]; then
+              if unzip -p "$BOOK_PATH" "$OPF_FILE" | grep -q "EasyPub"; then
+                IS_EASYPUB=true
               fi
+            fi
+
+            if [ "$IS_EASYPUB" = true ] && [ "$HTML_COUNT" -ge 3000 ]; then
+              echo "Skip oversized EasyPub EPUB (${HTML_COUNT} HTML files): $BOOK_PATH"
+              echo "$BOOK_PATH" >> skipped_books.txt
+              SKIPPED_CHANGED=true
               continue
             fi
 
             timeout 8m ebook-convert "$BOOK_PATH" "$PDF_PATH" --input-encoding utf-8 >/tmp/ebook-convert.log 2>&1
             CONVERT_STATUS=$?
 
-            if [ "$CONVERT_STATUS" -eq 0 ]; then
-              curl --fail-with-body -F document=@"${PDF_PATH}" \
-                   -F caption="📅 今日书单: ${RAW_NAME}" \
-                   "https://api.telegram.org/bot${{ secrets.TG_TOKEN }}/sendDocument?chat_id=${{ secrets.TG_CHAT_ID }}"
-              CURL_STATUS=$?
-
-              if [ "$CURL_STATUS" -ne 0 ]; then
-                echo "Telegram send failed: $BOOK_PATH"
-                exit 1
-              fi
-
-              echo "$BOOK_PATH" >> sent_books.txt
-              FOUND=true
-              break
-            else
+            if [ "$CONVERT_STATUS" -ne 0 ]; then
               echo "Conversion failed, permanently skipping: $BOOK_PATH"
-              if ! grep -Fxq "$BOOK_PATH" skipped_books.txt; then
-                echo "$BOOK_PATH" >> skipped_books.txt
-                SKIPPED_CHANGED=true
-              fi
+              echo "$BOOK_PATH" >> skipped_books.txt
+              SKIPPED_CHANGED=true
               rm -f "$PDF_PATH"
+              continue
             fi
+
+            curl --fail-with-body \
+              -F document=@"$PDF_PATH" \
+              -F caption="📅 今日书单: ${RAW_NAME}" \
+              "https://api.telegram.org/bot${{ secrets.TG_TOKEN }}/sendDocument?chat_id=${{ secrets.TG_CHAT_ID }}"
+
+            CURL_STATUS=$?
+            if [ "$CURL_STATUS" -ne 0 ]; then
+              echo "Telegram send failed: $BOOK_PATH"
+              exit 1
+            fi
+
+            echo "$BOOK_PATH" >> sent_books.txt
+            FOUND=true
+            break
           done < all_books.txt
+
+          sort -u sent_books.txt -o sent_books.txt
+          sort -u skipped_books.txt -o skipped_books.txt
 
           echo "found=$FOUND" >> "$GITHUB_OUTPUT"
           echo "skipped_changed=$SKIPPED_CHANGED" >> "$GITHUB_OUTPUT"
-
-          if [ "$FOUND" = false ]; then
-            echo "No valid unsent books left."
-          fi
 
       - name: Save Progress
         if: steps.process.outputs.found == 'true' || steps.process.outputs.skipped_changed == 'true'
