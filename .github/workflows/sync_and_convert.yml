@@ -1,4 +1,5 @@
 name: Daily Book Delivery
+
 on:
   schedule:
     - cron: '0 2 * * *'
@@ -11,77 +12,75 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v3
 
-      - name: Pick One Book
-        id: pick
+      - name: Install Calibre and Fonts
         run: |
-          # 确保 sent_books.txt 存在
-          touch sent_books.txt
+          sudo apt-get update
+          sudo apt-get install -y calibre fonts-wqy-zenhei
 
+      - name: Pick, Convert and Send
+        id: process
+        run: |
+          touch sent_books.txt skipped_books.txt
           find . -name "*.epub" | sort > all_books.txt
 
-          SELECTED=""
+          FOUND=false
+          SENT_FILE=""
+          SENT_CAPTION=""
+          SENT_BOOK=""
+          SKIPPED_CHANGED=false
 
-          while IFS= read -r line; do
-            # ⭐ 精确匹配（整行匹配）
-            if ! grep -Fxq "$line" sent_books.txt; then
-              SELECTED="$line"
+          while IFS= read -r BOOK_PATH; do
+            if grep -Fxq "$BOOK_PATH" sent_books.txt; then
+              continue
+            fi
+
+            if grep -Fxq "$BOOK_PATH" skipped_books.txt; then
+              continue
+            fi
+
+            RAW_NAME=$(basename "$BOOK_PATH" .epub)
+            PDF_PATH="${RAW_NAME}.pdf"
+
+            echo "Trying: $BOOK_PATH"
+
+            if timeout 25m ebook-convert "$BOOK_PATH" "$PDF_PATH" --input-encoding utf-8; then
+              curl --fail-with-body -F document=@"${PDF_PATH}" \
+                   -F caption="📅 今日书单: ${RAW_NAME}" \
+                   "https://api.telegram.org/bot${{ secrets.TG_TOKEN }}/sendDocument?chat_id=${{ secrets.TG_CHAT_ID }}"
+
+              echo "$BOOK_PATH" >> sent_books.txt
+              FOUND=true
+              SENT_BOOK="$BOOK_PATH"
               break
+            else
+              echo "Conversion failed, permanently skipping: $BOOK_PATH"
+              if ! grep -Fxq "$BOOK_PATH" skipped_books.txt; then
+                echo "$BOOK_PATH" >> skipped_books.txt
+                SKIPPED_CHANGED=true
+              fi
             fi
           done < all_books.txt
 
-          if [ -z "$SELECTED" ]; then
-            echo "All books sent."
-            echo "found=false" >> $GITHUB_OUTPUT
-            exit 0
+          echo "found=$FOUND" >> "$GITHUB_OUTPUT"
+          echo "skipped_changed=$SKIPPED_CHANGED" >> "$GITHUB_OUTPUT"
+
+          if [ "$FOUND" = false ]; then
+            echo "No valid unsent books left."
           fi
-
-          echo "BOOK_PATH=$SELECTED" >> $GITHUB_ENV
-          echo "found=true" >> $GITHUB_OUTPUT
-
-      - name: Install Calibre and Fonts
-        if: steps.pick.outputs.found == 'true'
-        run: |
-          sudo apt-get update
-          # 安装 Calibre 以及中文字体，防止 PDF 乱码
-          sudo apt-get install -y calibre fonts-wqy-zenhei
-
-      - name: Convert and Send
-        if: steps.pick.outputs.found == 'true'
-        run: |
-          RAW_NAME=$(basename "${{ env.BOOK_PATH }}" .epub)
-          PDF_PATH="${RAW_NAME}.pdf"
-          SEND_FILE="${PDF_PATH}"
-          CAPTION="📅 今日书单: ${RAW_NAME}"
-
-          # 转换命令：特别指定输出编码为 utf-8。若转换超时或失败，则回退发送原始 epub，避免任务整体失败
-          if ! timeout 25m ebook-convert "${{ env.BOOK_PATH }}" "${PDF_PATH}" --input-encoding utf-8; then
-            echo "PDF conversion failed or timed out, fallback to original EPUB"
-            SEND_FILE="${{ env.BOOK_PATH }}"
-            CAPTION="📅 今日书单(EPUB): ${RAW_NAME}"
-          fi
-          
-          curl --fail-with-body -v -F document=@"${SEND_FILE}" \
-               -F caption="${CAPTION}" \
-               "https://api.telegram.org/bot${{ secrets.TG_TOKEN }}/sendDocument?chat_id=${{ secrets.TG_CHAT_ID }}"
 
       - name: Save Progress
-        if: steps.pick.outputs.found == 'true'
+        if: steps.process.outputs.found == 'true' || steps.process.outputs.skipped_changed == 'true'
         run: |
-          RAW_NAME=$(basename "${{ env.BOOK_PATH }}" .epub)
-          echo "${{ env.BOOK_PATH }}" >> sent_books.txt
-
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
 
-          git add sent_books.txt
+          git add sent_books.txt skipped_books.txt
 
-          # ⭐ 防止空提交导致失败
           if ! git diff --cached --quiet; then
-            git commit -m "Update: $RAW_NAME"
+            git commit -m "Update sent/skipped books"
           else
             echo "No changes to commit"
           fi
 
-          # ⭐ 避免冲突
           git pull origin main --rebase
           git push origin main
