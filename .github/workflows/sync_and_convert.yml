@@ -11,7 +11,7 @@ jobs:
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Install Calibre and Fonts
         run: |
@@ -22,7 +22,11 @@ jobs:
         id: process
         shell: bash
         run: |
-          set +e
+          set -u
+
+          # Telegram Bot API uploads are small compared with ordinary Telegram clients.
+          # Keep some headroom below the common 50 MiB document upload limit.
+          MAX_UPLOAD_BYTES=$((49 * 1024 * 1024))
 
           touch sent_books.txt skipped_books.txt
           find . -name "*.epub" | sort -u > all_books.txt
@@ -71,6 +75,17 @@ jobs:
 
             if [ "$CONVERT_STATUS" -ne 0 ]; then
               echo "Conversion failed, permanently skipping: $BOOK_PATH"
+              cat /tmp/ebook-convert.log
+              echo "$BOOK_PATH" >> skipped_books.txt
+              SKIPPED_CHANGED=true
+              rm -f "$PDF_PATH"
+              continue
+            fi
+
+            PDF_SIZE="$(stat -c%s "$PDF_PATH")"
+            if [ "$PDF_SIZE" -gt "$MAX_UPLOAD_BYTES" ]; then
+              echo "PDF is too large for Telegram Bot upload: $PDF_PATH (${PDF_SIZE} bytes)"
+              echo "Permanently skipping: $BOOK_PATH"
               echo "$BOOK_PATH" >> skipped_books.txt
               SKIPPED_CHANGED=true
               rm -f "$PDF_PATH"
@@ -84,12 +99,16 @@ jobs:
 
             CURL_STATUS=$?
             if [ "$CURL_STATUS" -ne 0 ]; then
-              echo "Telegram send failed: $BOOK_PATH"
-              exit 1
+              echo "Telegram send failed, marking as skipped to avoid retry loop: $BOOK_PATH"
+              echo "$BOOK_PATH" >> skipped_books.txt
+              SKIPPED_CHANGED=true
+              rm -f "$PDF_PATH"
+              continue
             fi
 
             echo "$BOOK_PATH" >> sent_books.txt
             FOUND=true
+            rm -f "$PDF_PATH"
             break
           done < all_books.txt
 
