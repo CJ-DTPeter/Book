@@ -5,13 +5,39 @@ on:
     - cron: "0 2 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   send_book:
     runs-on: ubuntu-latest
 
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - key: cj-book
+            repository: CJ-DTPeter/Book
+          - key: geektime-books
+            repository: it-ebooks-0/geektime-books
+          - key: pua-books
+            repository: LeonYanghaha/pua-books
+          - key: history
+            repository: PirateBook1/history
+
     steps:
-      - name: Checkout Code
+      - name: Checkout Control Repository
         uses: actions/checkout@v4
+        with:
+          path: control
+
+      - name: Checkout Source Repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.repository }}
+          path: source
+          lfs: true
 
       - name: Install Calibre and Fonts
         run: |
@@ -21,116 +47,144 @@ jobs:
       - name: Pick, Convert and Send
         id: process
         shell: bash
+        working-directory: control
         run: |
           set -u
 
-          # Telegram Bot API uploads are small compared with ordinary Telegram clients.
-          # Keep some headroom below the common 50 MiB document upload limit.
           MAX_UPLOAD_BYTES=$((49 * 1024 * 1024))
+          PROGRESS_DIR="progress/${{ matrix.key }}"
+          SENT_FILE="${PROGRESS_DIR}/sent_books.txt"
+          SKIPPED_FILE="${PROGRESS_DIR}/skipped_books.txt"
+          SOURCE_DIR="../source"
+          TMP_DIR="${RUNNER_TEMP}/book-delivery-${{ matrix.key }}"
 
-          touch sent_books.txt skipped_books.txt
-          find . -name "*.epub" | sort -u > all_books.txt
-          sort -u sent_books.txt -o sent_books.txt
-          sort -u skipped_books.txt -o skipped_books.txt
+          mkdir -p "$PROGRESS_DIR" "$TMP_DIR"
+          touch "$SENT_FILE" "$SKIPPED_FILE"
+
+          find "$SOURCE_DIR" -type f \( -iname "*.epub" -o -iname "*.pdf" -o -iname "*.mobi" \) | sort -u > all_books.txt
+          sort -u "$SENT_FILE" -o "$SENT_FILE"
+          sort -u "$SKIPPED_FILE" -o "$SKIPPED_FILE"
 
           FOUND=false
           SKIPPED_CHANGED=false
 
           while IFS= read -r BOOK_PATH; do
-            grep -Fxq "$BOOK_PATH" sent_books.txt && continue
-            grep -Fxq "$BOOK_PATH" skipped_books.txt && continue
+            BOOK_REL="${BOOK_PATH#${SOURCE_DIR}/}"
 
-            RAW_NAME="$(basename "$BOOK_PATH" .epub)"
-            PDF_PATH="${RAW_NAME}.pdf"
+            grep -Fxq "$BOOK_REL" "$SENT_FILE" && continue
+            grep -Fxq "$BOOK_REL" "$SKIPPED_FILE" && continue
 
-            echo "Trying: $BOOK_PATH"
+            BOOK_FILE="$(basename "$BOOK_PATH")"
+            EXT="${BOOK_FILE##*.}"
+            EXT="${EXT,,}"
+            RAW_NAME="${BOOK_FILE%.*}"
+            SEND_PATH=""
+            GENERATED_FILE=false
 
-            HTML_COUNT="$(
-              unzip -Z1 "$BOOK_PATH" |
-              grep -Eci '\.(html|xhtml)$'
-            )"
+            echo "Trying: ${{ matrix.repository }} / $BOOK_REL"
 
-            OPF_FILE="$(
-              unzip -Z1 "$BOOK_PATH" |
-              grep -E '(^|/)content\.opf$' |
-              head -n 1
-            )"
+            if [ "$EXT" = "pdf" ]; then
+              SEND_PATH="$BOOK_PATH"
+            elif [ "$EXT" = "epub" ] || [ "$EXT" = "mobi" ]; then
+              if [ "$EXT" = "epub" ]; then
+                HTML_COUNT="$(
+                  unzip -Z1 "$BOOK_PATH" 2>/dev/null |
+                  grep -Eci '\.(html|xhtml)$'
+                )"
 
-            IS_EASYPUB=false
-            if [ -n "$OPF_FILE" ]; then
-              if unzip -p "$BOOK_PATH" "$OPF_FILE" | grep -q "EasyPub"; then
-                IS_EASYPUB=true
+                OPF_FILE="$(
+                  unzip -Z1 "$BOOK_PATH" 2>/dev/null |
+                  grep -E '(^|/)content\.opf$' |
+                  head -n 1
+                )"
+
+                IS_EASYPUB=false
+                if [ -n "$OPF_FILE" ]; then
+                  if unzip -p "$BOOK_PATH" "$OPF_FILE" | grep -q "EasyPub"; then
+                    IS_EASYPUB=true
+                  fi
+                fi
+
+                if [ "$IS_EASYPUB" = true ] && [ "$HTML_COUNT" -ge 3000 ]; then
+                  echo "Skip oversized EasyPub EPUB (${HTML_COUNT} HTML files): $BOOK_REL"
+                  echo "$BOOK_REL" >> "$SKIPPED_FILE"
+                  SKIPPED_CHANGED=true
+                  continue
+                fi
               fi
-            fi
 
-            if [ "$IS_EASYPUB" = true ] && [ "$HTML_COUNT" -ge 3000 ]; then
-              echo "Skip oversized EasyPub EPUB (${HTML_COUNT} HTML files): $BOOK_PATH"
-              echo "$BOOK_PATH" >> skipped_books.txt
-              SKIPPED_CHANGED=true
+              SEND_PATH="${TMP_DIR}/${RAW_NAME}.pdf"
+              GENERATED_FILE=true
+
+              timeout 8m ebook-convert "$BOOK_PATH" "$SEND_PATH" --input-encoding utf-8 >/tmp/ebook-convert.log 2>&1
+              CONVERT_STATUS=$?
+
+              if [ "$CONVERT_STATUS" -ne 0 ]; then
+                echo "Conversion failed, permanently skipping: $BOOK_REL"
+                cat /tmp/ebook-convert.log
+                echo "$BOOK_REL" >> "$SKIPPED_FILE"
+                SKIPPED_CHANGED=true
+                rm -f "$SEND_PATH"
+                continue
+              fi
+            else
               continue
             fi
 
-            timeout 8m ebook-convert "$BOOK_PATH" "$PDF_PATH" --input-encoding utf-8 >/tmp/ebook-convert.log 2>&1
-            CONVERT_STATUS=$?
-
-            if [ "$CONVERT_STATUS" -ne 0 ]; then
-              echo "Conversion failed, permanently skipping: $BOOK_PATH"
-              cat /tmp/ebook-convert.log
-              echo "$BOOK_PATH" >> skipped_books.txt
+            FILE_SIZE="$(stat -c%s "$SEND_PATH")"
+            if [ "$FILE_SIZE" -gt "$MAX_UPLOAD_BYTES" ]; then
+              echo "File is too large for Telegram Bot upload: $BOOK_REL (${FILE_SIZE} bytes)"
+              echo "$BOOK_REL" >> "$SKIPPED_FILE"
               SKIPPED_CHANGED=true
-              rm -f "$PDF_PATH"
-              continue
-            fi
-
-            PDF_SIZE="$(stat -c%s "$PDF_PATH")"
-            if [ "$PDF_SIZE" -gt "$MAX_UPLOAD_BYTES" ]; then
-              echo "PDF is too large for Telegram Bot upload: $PDF_PATH (${PDF_SIZE} bytes)"
-              echo "Permanently skipping: $BOOK_PATH"
-              echo "$BOOK_PATH" >> skipped_books.txt
-              SKIPPED_CHANGED=true
-              rm -f "$PDF_PATH"
+              if [ "$GENERATED_FILE" = true ]; then
+                rm -f "$SEND_PATH"
+              fi
               continue
             fi
 
             curl --fail-with-body \
-              -F document=@"$PDF_PATH" \
-              -F caption="📅 今日书单: ${RAW_NAME}" \
+              -F document=@"$SEND_PATH" \
+              -F caption="📅 今日书单: ${{ matrix.key }} / ${RAW_NAME}" \
               "https://api.telegram.org/bot${{ secrets.TG_TOKEN }}/sendDocument?chat_id=${{ secrets.TG_CHAT_ID }}"
 
             CURL_STATUS=$?
             if [ "$CURL_STATUS" -ne 0 ]; then
-              echo "Telegram send failed, marking as skipped to avoid retry loop: $BOOK_PATH"
-              echo "$BOOK_PATH" >> skipped_books.txt
+              echo "Telegram send failed, marking as skipped to avoid retry loop: $BOOK_REL"
+              echo "$BOOK_REL" >> "$SKIPPED_FILE"
               SKIPPED_CHANGED=true
-              rm -f "$PDF_PATH"
+              if [ "$GENERATED_FILE" = true ]; then
+                rm -f "$SEND_PATH"
+              fi
               continue
             fi
 
-            echo "$BOOK_PATH" >> sent_books.txt
+            echo "$BOOK_REL" >> "$SENT_FILE"
             FOUND=true
-            rm -f "$PDF_PATH"
+            if [ "$GENERATED_FILE" = true ]; then
+              rm -f "$SEND_PATH"
+            fi
             break
           done < all_books.txt
 
-          sort -u sent_books.txt -o sent_books.txt
-          sort -u skipped_books.txt -o skipped_books.txt
+          sort -u "$SENT_FILE" -o "$SENT_FILE"
+          sort -u "$SKIPPED_FILE" -o "$SKIPPED_FILE"
 
           echo "found=$FOUND" >> "$GITHUB_OUTPUT"
           echo "skipped_changed=$SKIPPED_CHANGED" >> "$GITHUB_OUTPUT"
 
       - name: Save Progress
         if: steps.process.outputs.found == 'true' || steps.process.outputs.skipped_changed == 'true'
+        working-directory: control
         run: |
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
 
-          git add sent_books.txt skipped_books.txt
+          git add progress/
 
           if ! git diff --cached --quiet; then
-            git commit -m "Update sent/skipped books"
+            git commit -m "Update delivery progress for ${{ matrix.key }}"
+            git pull origin main --rebase
+            git push origin main
           else
             echo "No changes to commit"
           fi
-
-          git pull origin main --rebase
-          git push origin main
